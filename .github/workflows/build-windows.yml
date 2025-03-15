@@ -1,4 +1,4 @@
-name: windows-llvm-msvc-build
+name: windows-llvm-msvc-build-simple
 
 permissions:
   contents: write
