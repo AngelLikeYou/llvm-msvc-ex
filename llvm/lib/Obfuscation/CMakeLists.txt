@@ -9,8 +9,11 @@ add_llvm_pass_plugin(Obfuscation
         IndirectGlobalVars.cpp
         StringObfuscation.cpp
         MBAObfuscation.cpp
+        MBAMatrix.cpp
+        LinearMBA.cpp
         ConstObfuscation.cpp
         DataObfuscation.cpp
+        VMObfuscatorPass.cpp
         VMFlatten.cpp
         xVMProtect.cpp
         xVMTranslator.cpp
@@ -26,6 +29,8 @@ add_llvm_pass_plugin(Obfuscation
         IndirectBranch.cpp
         GlobalsEncryption.cpp
         CustomCC.cpp
+        AntiIDA.cpp
+        CodePicPass.cpp
         Plugin.cpp
 
         ADDITIONAL_HEADER_DIRS

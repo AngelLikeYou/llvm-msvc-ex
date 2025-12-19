@@ -8,6 +8,7 @@
 #include "IndirectCall.h"
 #include "IndirectGlobalVars.h"
 #include "Linearize.h"
+#include "LinearMBA.h"
 #include "MBAObfuscation.h"
 #include "SplitBasicBlock.h"
 #include "StringObfuscation.h"
@@ -23,6 +24,9 @@
 #include <GlobalsEncryption.h>
 #include <IndirectBranch.h>
 #include <CustomCC.h>
+#include <AntiIDA.h>
+#include <CodePicPass.h>
+#include <VMObfuscatorPass.h>
 
 using namespace llvm;
 
@@ -30,17 +34,30 @@ llvm::PassPluginLibraryInfo getObfuscationPluginInfo() {
   return {
       LLVM_PLUGIN_API_VERSION, "Obfuscation", LLVM_VERSION_STRING,
       [](PassBuilder &PB) {
+        PB.registerPipelineParsingCallback([](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
+          MPM.addPass(CodePicPass());
+          return true;
+        });
+        PB.registerPipelineParsingCallback(
+                [](StringRef Name, FunctionPassManager &FPM, ArrayRef<PassBuilder::PipelineElement>) {
+                  FPM.addPass(CodePicPass());
+                  return true;
+                });
+
         PB.registerPipelineStartEPCallback([](llvm::ModulePassManager &MPM,
                                               OptimizationLevel Level) {
-
+          MPM.addPass(VmObfuscatorPass());
           MPM.addPass(createModuleToFunctionPassAdaptor(SplitBasicBlockPass()));
           MPM.addPass(
               createModuleToFunctionPassAdaptor(BogusControlFlowPass()));
           MPM.addPass(createModuleToFunctionPassAdaptor(SubstitutionPass()));
           MPM.addPass(createModuleToFunctionPassAdaptor(MBAObfuscationPass()));
+          MPM.addPass(createModuleToFunctionPassAdaptor(LinearMBAPass()));
           MPM.addPass(createModuleToFunctionPassAdaptor(FlatteningPass()));
           MPM.addPass(createModuleToFunctionPassAdaptor(VmProtectPass()));
           
+          MPM.addPass(CodePicPass());
+          MPM.addPass(createModuleToFunctionPassAdaptor(CodePicPass()));
 
         });
         PB.registerOptimizerEarlyEPCallback([](llvm::ModulePassManager &MPM,
@@ -67,6 +84,7 @@ llvm::PassPluginLibraryInfo getObfuscationPluginInfo() {
           MPM.addPass(Linearize());
           MPM.addPass(EasyCfgPass());
           MPM.addPass(createModuleToFunctionPassAdaptor(IndirectBranch()));
+          MPM.addPass(AntiIDAPass());
           
         });
         //PB.registerVectorizerStartEPCallback(

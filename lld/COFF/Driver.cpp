@@ -2047,7 +2047,7 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
     parseMerge(".00cfg=.rdata");
     
     parseMerge(".voltbl=.rdata");
-    parseMerge("newworld=.rdata");
+//    parseMerge("newworld=.rdata");
     
     if (config->driver)
       parseMerge("INIT2=INIT");
@@ -2280,6 +2280,10 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
   // Handle /RELEASE
   if (args.hasArg(OPT_release))
     config->writeCheckSum = true;
+
+  // Handle /rich
+  if (args.hasArg(OPT_rich))
+    config->useRich = true;
 
   run();
   if (errorCount())
