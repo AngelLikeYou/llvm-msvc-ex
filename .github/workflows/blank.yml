@@ -112,7 +112,7 @@ jobs:
           7z a android-llvm-msvc.zip install
     
     - name: Upload Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: android-llvm-msvc
         path: android-llvm-msvc.zip
