@@ -1,0 +1,164 @@
+name: android-llvm-msvc-build
+
+permissions:
+  contents: write
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    # Skip building pull requests from the same repository
+    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+
+    env:
+      BUILD_TYPE: Release
+
+    steps:
+      - name: Setup build deps
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            make \
+            cmake \
+            ninja-build \
+            p7zip-full \
+            p7zip-rar \
+            gcc-11 \
+            g++-11 \
+            libstdc++-11-dev-arm64-cross
+
+          cmake --version
+          ninja --version
+          7z | head -n 1
+
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          path: llvm-msvc
+          submodules: recursive
+
+      - name: Build llvm
+        run: |
+          set -euxo pipefail
+
+          # Workaround: comment vcruntime_string include if it exists
+          find llvm-msvc/llvm -type f -exec sed -i 's/#include <vcruntime_string\.h>/\/\/ #include <vcruntime_string.h>/g' {} +
+
+          cmake -GNinja -B build \
+            -DCMAKE_INSTALL_PREFIX="$PWD/install" \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLDB_ENABLE_PYTHON=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DLLVM_TARGET_ARCH=AArch64 \
+            -DLLVM_TARGETS_TO_BUILD="X86;ARM;AArch64;RISCV" \
+            -DLLVM_ENABLE_PROJECTS="clang;lld;lldb" \
+            -DLLVM_HOST_TRIPLE="x86_64-pc-linux-gnu" \
+            -DLLVM_TARGET_TRIPLE="aarch64-linux-gnu" \
+            -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-gnu" \
+            llvm-msvc/llvm
+
+          time cmake --build build --config ${{ env.BUILD_TYPE }}
+          cmake --build build --config ${{ env.BUILD_TYPE }} --target install
+
+          echo "=== install tree (top) ==="
+          ls -lah install || true
+          ls -lah install/bin | head -n 200 || true
+
+      - name: Build runtimes
+        run: |
+          set -euxo pipefail
+
+          cmake -GNinja -B runtimes-build \
+            -DCMAKE_INSTALL_PREFIX="$PWD/install" \
+            -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
+            -DCMAKE_C_COMPILER="$PWD/install/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$PWD/install/bin/clang++" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld" \
+            -DCMAKE_C_COMPILER_TARGET="aarch64-linux-gnu" \
+            -DCMAKE_CXX_COMPILER_TARGET="aarch64-linux-gnu" \
+            -DCMAKE_C_FLAGS="-Wno-error -std=gnu11" \
+            -DCMAKE_CXX_FLAGS="-Wno-error -std=c++20" \
+            -DCMAKE_CXX_COMPILER_WORKS=1 \
+            -DCMAKE_CXX_COMPILER_ID=Clang \
+            -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+            llvm-msvc/runtimes
+
+          time cmake --build runtimes-build --config ${{ env.BUILD_TYPE }}
+          cmake --build runtimes-build --config ${{ env.BUILD_TYPE }} --target install
+
+      - name: Build compiler-rt
+        run: |
+          set -euxo pipefail
+
+          cmake -GNinja -B compiler-rt-build \
+            -DCMAKE_INSTALL_PREFIX="$PWD/install" \
+            -DCOMPILER_RT_BUILD_BUILTINS=ON \
+            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+            -DCOMPILER_RT_BUILD_MEMPROF=ON \
+            -DCOMPILER_RT_BUILD_PROFILE=ON \
+            -DCOMPILER_RT_BUILD_SANITIZERS=ON \
+            -DCOMPILER_RT_BUILD_XRAY=ON \
+            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld" \
+            -DCMAKE_ASM_COMPILER_TARGET="aarch64-linux-gnu" \
+            -DCMAKE_C_COMPILER_TARGET="aarch64-linux-gnu" \
+            -DCMAKE_CXX_COMPILER_TARGET="aarch64-linux-gnu" \
+            -DCMAKE_C_COMPILER="$PWD/install/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$PWD/install/bin/clang++" \
+            -DLLVM_CONFIG_PATH="$PWD/install/bin/llvm-config" \
+            -DCMAKE_AR="$PWD/install/bin/llvm-ar" \
+            -DCMAKE_NM="$PWD/install/bin/llvm-nm" \
+            -DCMAKE_CXX_COMPILER_WORKS=1 \
+            -DCMAKE_CXX_COMPILER_ID=Clang \
+            -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+            -DCMAKE_C_FLAGS="-Wno-error -std=gnu11" \
+            -DCMAKE_CXX_FLAGS="-Wno-error -std=c++20" \
+            llvm-msvc/compiler-rt
+
+          time cmake --build compiler-rt-build --config ${{ env.BUILD_TYPE }}
+          cmake --build compiler-rt-build --config ${{ env.BUILD_TYPE }} --target install
+
+      - name: Package llvm
+        run: |
+          set -euxo pipefail
+          echo "=== before packaging ==="
+          ls -lah
+          ls -lah install || true
+
+          # Ensure install exists
+          test -d install
+
+          7z a android-llvm-msvc.zip install
+
+          echo "=== packaged ==="
+          ls -lah android-llvm-msvc.zip
+          test -f android-llvm-msvc.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-llvm-msvc
+          path: android-llvm-msvc.zip
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        with:
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') || contains(github.ref, '-pre') }}
+          files: android-llvm-msvc.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
