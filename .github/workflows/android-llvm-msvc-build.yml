@@ -7,37 +7,40 @@ on: [push, pull_request]
 
 jobs:
   build:
-    # Skip building pull requests from the same repository
     if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
 
     env:
       BUILD_TYPE: Release
+      TARGET_TRIPLE: aarch64-linux-gnu
 
     steps:
       - name: Setup build deps
         run: |
           set -euxo pipefail
           sudo apt-get update
+
+          # Host build deps
           sudo apt-get install -y \
-            build-essential \
-            make \
-            cmake \
-            ninja-build \
-            p7zip-full \
-            p7zip-rar \
-            gcc-11 \
-            g++-11 \
-            libstdc++-11-dev-arm64-cross
+            build-essential cmake ninja-build git python3 \
+            p7zip-full p7zip-rar
+
+          # Cross toolchain + sysroot for aarch64-linux-gnu
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            libc6-dev-arm64-cross linux-libc-dev-arm64-cross
+
+          # Some common deps LLVM may probe for (safe to have)
+          sudo apt-get install -y \
+            zlib1g-dev libzstd-dev libtinfo-dev
 
           cmake --version
           ninja --version
-          7z | head -n 1
+          aarch64-linux-gnu-gcc --version
 
       - name: Checkout Repo
         uses: actions/checkout@v3
@@ -45,108 +48,109 @@ jobs:
           path: llvm-msvc
           submodules: recursive
 
-      - name: Build llvm
+      - name: Build LLVM (host clang/lld)
         run: |
           set -euxo pipefail
 
-          # Workaround: comment vcruntime_string include if it exists
-          find llvm-msvc/llvm -type f -exec sed -i 's/#include <vcruntime_string\.h>/\/\/ #include <vcruntime_string.h>/g' {} +
+          # 你原来那条 sed 我保留（如果你的代码确实需要）
+          find llvm-msvc/llvm -type f -exec sed -i 's/#include <vcruntime_string\.h>/\/\/ #include <vcruntime_string.h>/g' {} + || true
 
           cmake -GNinja -B build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_INSTALL_PREFIX="$PWD/install" \
             -DLLVM_INCLUDE_TESTS=OFF \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_ENABLE_ASSERTIONS=OFF \
-            -DLLDB_ENABLE_PYTHON=OFF \
             -DLLVM_ENABLE_LIBXML2=OFF \
             -DLLVM_ENABLE_ZLIB=OFF \
-            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-            -DLLVM_TARGET_ARCH=AArch64 \
+            -DLLVM_ENABLE_PROJECTS="clang;lld" \
             -DLLVM_TARGETS_TO_BUILD="X86;ARM;AArch64;RISCV" \
-            -DLLVM_ENABLE_PROJECTS="clang;lld;lldb" \
-            -DLLVM_HOST_TRIPLE="x86_64-pc-linux-gnu" \
-            -DLLVM_TARGET_TRIPLE="aarch64-linux-gnu" \
-            -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-gnu" \
             llvm-msvc/llvm
 
-          time cmake --build build --config ${{ env.BUILD_TYPE }}
+          cmake --build build --config ${{ env.BUILD_TYPE }}
           cmake --build build --config ${{ env.BUILD_TYPE }} --target install
 
-          echo "=== install tree (top) ==="
-          ls -lah install || true
-          ls -lah install/bin | head -n 200 || true
+          "$PWD/install/bin/clang" --version
+          "$PWD/install/bin/ld.lld" --version
 
-      - name: Build runtimes
+      - name: Detect aarch64 sysroot
+        run: |
+          set -euxo pipefail
+          # Ubuntu cross sysroot 常见位置
+          if [ -d "/usr/aarch64-linux-gnu" ]; then
+            echo "SYSROOT=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
+          elif [ -d "/usr/${{ env.TARGET_TRIPLE }}" ]; then
+            echo "SYSROOT=/usr/${{ env.TARGET_TRIPLE }}" >> $GITHUB_ENV
+          else
+            echo "Cannot find sysroot under /usr/aarch64-linux-gnu or /usr/${{ env.TARGET_TRIPLE }}"
+            ls -lah /usr | head
+            exit 1
+          fi
+
+      - name: Build runtimes (libcxx/libcxxabi/libunwind) for aarch64
         run: |
           set -euxo pipefail
 
+          # 强烈建议用 libc++ 自己的“交叉编译”方式：指定 target + sysroot + 交叉 ar/nm/ranlib
           cmake -GNinja -B runtimes-build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_INSTALL_PREFIX="$PWD/install" \
             -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
             -DCMAKE_C_COMPILER="$PWD/install/bin/clang" \
             -DCMAKE_CXX_COMPILER="$PWD/install/bin/clang++" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
-            -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld" \
-            -DCMAKE_C_COMPILER_TARGET="aarch64-linux-gnu" \
-            -DCMAKE_CXX_COMPILER_TARGET="aarch64-linux-gnu" \
-            -DCMAKE_C_FLAGS="-Wno-error -std=gnu11" \
-            -DCMAKE_CXX_FLAGS="-Wno-error -std=c++20" \
-            -DCMAKE_CXX_COMPILER_WORKS=1 \
-            -DCMAKE_CXX_COMPILER_ID=Clang \
+            -DCMAKE_C_COMPILER_TARGET="${{ env.TARGET_TRIPLE }}" \
+            -DCMAKE_CXX_COMPILER_TARGET="${{ env.TARGET_TRIPLE }}" \
+            -DCMAKE_SYSROOT="${SYSROOT}" \
+            -DCMAKE_AR="aarch64-linux-gnu-ar" \
+            -DCMAKE_NM="aarch64-linux-gnu-nm" \
+            -DCMAKE_RANLIB="aarch64-linux-gnu-ranlib" \
+            -DCMAKE_EXE_LINKER_FLAGS="--sysroot=${SYSROOT} -fuse-ld=lld" \
+            -DCMAKE_SHARED_LINKER_FLAGS="--sysroot=${SYSROOT} -fuse-ld=lld" \
             -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+            -DLIBCXX_ENABLE_SHARED=OFF \
+            -DLIBCXXABI_ENABLE_SHARED=OFF \
             llvm-msvc/runtimes
 
-          time cmake --build runtimes-build --config ${{ env.BUILD_TYPE }}
+          cmake --build runtimes-build --config ${{ env.BUILD_TYPE }}
           cmake --build runtimes-build --config ${{ env.BUILD_TYPE }} --target install
 
-      - name: Build compiler-rt
+      - name: Build compiler-rt for aarch64
         run: |
           set -euxo pipefail
 
           cmake -GNinja -B compiler-rt-build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DCMAKE_INSTALL_PREFIX="$PWD/install" \
-            -DCOMPILER_RT_BUILD_BUILTINS=ON \
-            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
-            -DCOMPILER_RT_BUILD_MEMPROF=ON \
-            -DCOMPILER_RT_BUILD_PROFILE=ON \
-            -DCOMPILER_RT_BUILD_SANITIZERS=ON \
-            -DCOMPILER_RT_BUILD_XRAY=ON \
-            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
-            -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
-            -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld" \
-            -DCMAKE_ASM_COMPILER_TARGET="aarch64-linux-gnu" \
-            -DCMAKE_C_COMPILER_TARGET="aarch64-linux-gnu" \
-            -DCMAKE_CXX_COMPILER_TARGET="aarch64-linux-gnu" \
             -DCMAKE_C_COMPILER="$PWD/install/bin/clang" \
             -DCMAKE_CXX_COMPILER="$PWD/install/bin/clang++" \
+            -DCMAKE_C_COMPILER_TARGET="${{ env.TARGET_TRIPLE }}" \
+            -DCMAKE_CXX_COMPILER_TARGET="${{ env.TARGET_TRIPLE }}" \
+            -DCMAKE_SYSROOT="${SYSROOT}" \
+            -DCMAKE_AR="aarch64-linux-gnu-ar" \
+            -DCMAKE_NM="aarch64-linux-gnu-nm" \
+            -DCMAKE_RANLIB="aarch64-linux-gnu-ranlib" \
             -DLLVM_CONFIG_PATH="$PWD/install/bin/llvm-config" \
-            -DCMAKE_AR="$PWD/install/bin/llvm-ar" \
-            -DCMAKE_NM="$PWD/install/bin/llvm-nm" \
-            -DCMAKE_CXX_COMPILER_WORKS=1 \
-            -DCMAKE_CXX_COMPILER_ID=Clang \
-            -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
-            -DCMAKE_C_FLAGS="-Wno-error -std=gnu11" \
-            -DCMAKE_CXX_FLAGS="-Wno-error -std=c++20" \
+            -DCMAKE_EXE_LINKER_FLAGS="--sysroot=${SYSROOT} -fuse-ld=lld" \
+            -DCMAKE_SHARED_LINKER_FLAGS="--sysroot=${SYSROOT} -fuse-ld=lld" \
+            -DCOMPILER_RT_BUILD_BUILTINS=ON \
+            -DCOMPILER_RT_BUILD_SANITIZERS=ON \
+            -DCOMPILER_RT_BUILD_XRAY=ON \
+            -DCOMPILER_RT_BUILD_PROFILE=ON \
+            -DCOMPILER_RT_BUILD_MEMPROF=ON \
+            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
             llvm-msvc/compiler-rt
 
-          time cmake --build compiler-rt-build --config ${{ env.BUILD_TYPE }}
+          cmake --build compiler-rt-build --config ${{ env.BUILD_TYPE }}
           cmake --build compiler-rt-build --config ${{ env.BUILD_TYPE }} --target install
 
-      - name: Package llvm
+      - name: Package
         run: |
           set -euxo pipefail
-          echo "=== before packaging ==="
-          ls -lah
-          ls -lah install || true
-
-          # Ensure install exists
-          test -d install
-
+          ls -lah install
           7z a android-llvm-msvc.zip install
-
-          echo "=== packaged ==="
-          ls -lah android-llvm-msvc.zip
           test -f android-llvm-msvc.zip
+          ls -lah android-llvm-msvc.zip
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
